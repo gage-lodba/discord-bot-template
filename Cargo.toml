@@ -1,0 +1,98 @@
+[package]
+name = "discord-bot-template"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A single-guild Discord moderation bot"
+repository.workspace = true
+publish = false
+
+[workspace]
+# The `discord` crate is this repository's own from-scratch implementation of
+# the Discord v10 API (gateway + REST + models), built against the official API
+# reference. It lives in the workspace so it is versioned, linted and tested with
+# the bot rather than being an unpinned external dependency.
+members = ["crates/discord"]
+resolver = "3"
+
+[workspace.package]
+# Metadata every crate in the workspace inherits, so versions and the MSRV
+# cannot drift apart between the bot and its Discord crate.
+version = "0.1.0"
+edition = "2024"
+# Kept in sync with rust-toolchain.toml: 1.98 is the version both local builds
+# and CI compile with, so it is also the tested minimum.
+rust-version = "1.98"
+repository = "https://github.com/gage-lodba/discord-bot-template"
+
+[workspace.dependencies]
+# Every third-party version is declared exactly once here. Members opt in with
+# `dependency.workspace = true` and add only the features they need.
+futures-util = "0.3.34"
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "json",
+    "rustls-tls-webpki-roots",
+] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = "1.41.1"
+tokio-tungstenite = { version = "0.29.0", features = [
+    "rustls-tls-webpki-roots",
+] }
+tracing = "0.1.23"
+tracing-subscriber = "0.3"
+
+# Lint policy, inherited by every crate via `[lints] workspace = true`.
+#
+# The defaults below are warnings rather than denies so a local `cargo clippy`
+# shows them without failing; CI promotes them to errors with `-- -D warnings`
+# (and for rustdoc with `RUSTDOCFLAGS=-D warnings`).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+# Groups get a negative priority so a per-lint override (priority 0) always
+# wins, as clippy recommends.
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
+
+[workspace.lints.clippy]
+# Start from the standard and pedantic groups. Every lint is fixed rather than
+# allowed, including the ones that are tempting to suppress for wire-format
+# code (casts, documented names, wide structs).
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.release]
+# Ship a smaller, faster binary: thin LTO across the workspace and no DWARF
+# sections (symbol names stay, so backtraces still resolve).
+lto = "thin"
+strip = "debuginfo"
+
+[dependencies]
+discord = { path = "crates/discord" }
+# Only the runtime features the bot itself names. The `discord` crate and its
+# transport dependencies pull in the rest (net, sync, io-util) through feature
+# unification, so `full` would only compile modules nothing uses.
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "time",
+] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Used by tests to build Discord wire payloads from the shapes documented in the
+# API reference (option payloads, gateway events, HTTP error bodies).
+serde_json.workspace = true
+
+[lints]
+workspace = true

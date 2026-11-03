@@ -1,0 +1,33 @@
+[package]
+name = "discord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A from-scratch implementation of the Discord v10 API (gateway, REST and models)"
+repository.workspace = true
+publish = false
+
+# Dependencies are declared in the workspace manifest (single source of truth
+# for versions); this crate opts in and adds only the features it needs. The
+# transport crates (TLS, HTTP, WebSocket framing) are general-purpose
+# infrastructure; everything Discord-shaped is written here against the official
+# Discord API reference. The `docs/<page>.md` citations in comments point at that
+# reference; its local copy is not vendored in this template.
+[dependencies]
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

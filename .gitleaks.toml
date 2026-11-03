@@ -1,0 +1,36 @@
+# gitleaks configuration.
+#
+# This repository runs a full-history secret scan on every push and pull
+# request. The default ruleset does not reliably flag Discord bot tokens, so the
+# explicit rule below closes that gap and keeps the scan meaningful: a finding is
+# a real secret, not a known false positive that has been baselined away.
+
+title = "discord-bot-template secret scanning"
+
+# The CLI version this config is written against. Pinned in step with the
+# GITLEAKS_VERSION in .github/workflows/secret-scan.yml: the `[allowlist]` key
+# below is deprecated in favour of `[[allowlists]]` as of v9, so a silent CLI
+# upgrade is the thing most likely to break this file. gitleaks refuses to load
+# a config whose minVersion is newer than the binary, which surfaces that as a
+# clear error rather than a scan that quietly stops matching.
+minVersion = "v8.30.1"
+
+[extend]
+# Keep the upstream rules as well as the Discord-specific one below.
+useDefault = true
+
+[[rules]]
+id = "discord-bot-token"
+description = "Discord bot token"
+# Discord bot tokens are three dot separated parts: a base64url user id, a short
+# base64url segment, and a 38 character base64url signature.
+regex = '''(?i)(?:discord|bot)?[\s"'=:]*([A-Za-z0-9_-]{20,30}\.[A-Za-z0-9_-]{5,8}\.[A-Za-z0-9_-]{30,45})'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["discord", "token", "bot"]
+
+[allowlist]
+description = "Avoid flagging lockfiles and vendored sources"
+paths = [
+  '''Cargo\.lock''',
+]

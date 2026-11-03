@@ -1,0 +1,278 @@
+name: Lint, Build and Test
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Release action: draft a new release for the Cargo.toml version, or publish the existing draft'
+        required: true
+        default: draft
+        type: choice
+        options:
+          - draft
+          - publish
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # rust-toolchain.toml pins the channel, so no `rustup update stable` here:
+      # an unpinned toolchain is what let the lint job turn red on its own.
+      - name: Show toolchain
+        run: rustup show
+
+      - run: cargo fmt --all -- --check
+
+  # No `needs: formatting`. Clippy does not read rustfmt's output, so gating it
+  # on the formatting job only serialised 14s of work behind an unrelated check.
+  # The two now run concurrently; both still gate the build jobs, so nothing is
+  # published without passing either.
+  linting:
+    name: Linting
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show toolchain
+        run: rustup show
+
+      # Keyed on Cargo.lock: the lock pins every dependency, so the cached
+      # artifacts stay valid until a dependency actually changes. `shared-key`
+      # keeps this job's target/ separate from the build jobs' rather than
+      # letting three jobs evict each other from one entry.
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      # --all-features is omitted: the workspace declares no [features] section,
+      # so the flag selects nothing and only risks surprising behaviour if features
+      # are ever added without CI being reconsidered. --workspace is what keeps the
+      # discord member crate held to the same lint bar as the bot. The lint set
+      # itself (clippy all+pedantic, missing docs/Debug, unreachable pub, ...)
+      # lives in Cargo.toml under [workspace.lints] so local runs match CI.
+      - run: cargo clippy --workspace --release --all-targets --locked -- -D warnings
+
+      # The workspace lint policy denies broken, private and redundant intra-doc
+      # links; `-D warnings` turns any remaining documentation warning into a
+      # failure. This is a separate step because rustdoc lints only run for docs.
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: '-D warnings'
+        run: cargo doc --workspace --no-deps --locked
+
+  window-build:
+    name: Windows Build
+    needs: [formatting, linting]
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # This job was the critical path at ~11 minutes, nearly all of it
+      # recompiling the 154 dependency rlibs from scratch on every run. With a
+      # warm cache only the crate itself is rebuilt.
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --workspace --locked --verbose
+
+      - name: Upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-latest
+          path: target/release/discord-bot-template.exe
+
+  linux-build:
+    name: Linux Build
+    needs: [formatting, linting]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --workspace --locked --verbose
+
+      - name: Upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: ubuntu-latest
+          path: target/release/discord-bot-template
+
+  upload_release:
+    permissions:
+      contents: write
+    needs: [window-build, linux-build]
+    # Runs on a push to main, or on a manual dispatch. A pull request must never
+    # reach here, and the workflow only triggers on pushes to main, so `push`
+    # already implies the right ref.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Derive the tag from Cargo.toml rather than github.run_id, which produced
+      # a new meaningless "release" on every push. If a release for that version
+      # already exists the version has not been bumped, so there is nothing new
+      # to publish.
+      #
+      # The existence check goes through the releases API, not
+      # `git ls-remote --tags`: a draft release's tag is not advertised to git,
+      # so a git-based check missed the draft this job had just created and
+      # would have published a duplicate on every subsequent push.
+      #
+      # Two dispatch actions exist because a draft is not self-publishing. A
+      # push only ever *drafts*; `publish` is the deliberate second step.
+      - name: Resolve version
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.inputs.action }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read version from Cargo.toml"
+            exit 1
+          fi
+
+          tag="v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+          exists=false
+          if gh release view "$tag" >/dev/null 2>&1; then
+            exists=true
+          fi
+
+          if [ "${ACTION}" = "publish" ]; then
+            if [ "$exists" != "true" ]; then
+              echo "::error::no release found for ${tag}; there is nothing to publish"
+              exit 1
+            fi
+            echo "should_create=false" >> "$GITHUB_OUTPUT"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+            echo "Publishing the existing ${tag} release."
+          elif [ "$exists" = "true" ]; then
+            echo "should_create=false" >> "$GITHUB_OUTPUT"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "A release for ${tag} already exists; version was not bumped, skipping."
+          else
+            echo "should_create=true" >> "$GITHUB_OUTPUT"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "No release exists for ${tag}; drafting it."
+          fi
+
+      - name: Download Linux Artifact
+        if: steps.meta.outputs.should_create == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: ubuntu-latest
+
+      - name: Download Windows Artifact
+        if: steps.meta.outputs.should_create == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: windows-latest
+
+      - name: Restore execute permission and package
+        if: steps.meta.outputs.should_create == 'true'
+        run: |
+          set -euo pipefail
+          # upload-artifact does not preserve the executable bit; every file
+          # arrives as mode 644, so the raw binary is not runnable as published.
+          # (tar does preserve it, hence the archive for the Linux build.)
+          chmod +x discord-bot-template
+          tar -czf "discord-bot-template-${VERSION}-linux-x64.tar.gz" discord-bot-template
+          tar -tzvf "discord-bot-template-${VERSION}-linux-x64.tar.gz"
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+
+      - name: Verify the packaged binary is executable
+        if: steps.meta.outputs.should_create == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          tar -xzf "discord-bot-template-${VERSION}-linux-x64.tar.gz" -C verify
+          test -x verify/discord-bot-template || { echo "::error::discord-bot-template is not executable after extraction"; exit 1; }
+          file verify/discord-bot-template
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+
+      # Draft by default: a release is a deliberate act, and a draft is not
+      # visible to anyone but maintainers until it is published.
+      - name: Create draft release
+        if: steps.meta.outputs.should_create == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.meta.outputs.version }}
+          tag_name: v${{ steps.meta.outputs.version }}
+          draft: true
+          body: |
+            **Built by GitHub Actions** — [build log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            | Asset | Platform |
+            | --- | --- |
+            | `discord-bot-template-${{ steps.meta.outputs.version }}-linux-x64.tar.gz` | Linux x86-64 (extract before running) |
+            | `discord-bot-template.exe` | Windows x86-64 |
+
+            The bot token is read from the `DISCORD_TOKEN` environment variable; it is not embedded in these binaries.
+          files: |
+            discord-bot-template-${{ steps.meta.outputs.version }}-linux-x64.tar.gz
+            discord-bot-template.exe
+
+      # A draft never publishes itself, so this is the explicit second step.
+      # It only flips the draft to published: the assets were built from the
+      # same Cargo.toml version and are already attached, so there is nothing to
+      # rebuild or re-upload.
+      - name: Publish release
+        if: steps.meta.outputs.should_publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release edit "v${VERSION}" --draft=false --latest
+          gh release view "v${VERSION}" --json tagName,isDraft,assets \
+            --jq '{tag:.tagName, draft:.isDraft, assets:[.assets[].name]}'
